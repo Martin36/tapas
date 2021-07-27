@@ -41,7 +41,7 @@ class InnerProductNearestNeighbors:
       n_neighbors: Number of candidates to retrieve for each query.
       candidates: 2D Array of embeddings for each candidate.
     """
-    self._n_neighbors = n_neighbors
+    self._n_neighbors = n_neighbors if n_neighbors < candidates.shape[0] else  candidates.shape[0]
     self._candidates = candidates
 
   def neighbors(self, queries):

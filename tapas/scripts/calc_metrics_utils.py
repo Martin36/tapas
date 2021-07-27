@@ -31,6 +31,7 @@ import tensorflow.compat.v1 as tf
 
 _Answer = interaction_pb2.Answer
 
+tf.disable_eager_execution()
 
 @dataclasses.dataclass
 class Example:
