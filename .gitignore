@@ -1,3 +1,9 @@
-__pycache__/
-*_pb2.py
+venv/
+data/
 tapas_table_parsing.egg-info/
+tapas_dual_encoder_proj_256_small/
+tapas_dual_encoder_proj_256_large/
+__pycache__/
+models/
+.vscode/
+*pb2.py

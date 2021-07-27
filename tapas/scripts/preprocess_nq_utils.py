@@ -261,6 +261,24 @@ def _get_table_proto(
       new_row.cells.add().text = cell
   return table
 
+def _get_table_proto_fever(
+    table_id,
+    document_title,
+    table_dict,
+):
+  """Converts a table dictionary to a Table proto."""
+  table = interaction_pb2.Table()
+  table.table_id = table_id
+  table.document_title = document_title
+
+  for column in table_dict.header:
+    table.columns.add().text = column
+
+  for row in table_dict.rows:
+    new_row = table.rows.add()
+    for cell in row:
+      new_row.cells.add().text = cell
+  return table
 
 def _matches(answer, cell):
   return answer in cell
@@ -383,6 +401,44 @@ def _create_interaction(
   interaction.table.CopyFrom(table)
   return interaction
 
+def _create_interaction_fever(
+    example_id,
+    question_text,
+    answer_groups,
+    table,
+):
+  """Creates an interaction instance that corresponds to some short answer."""
+  interaction = interaction_pb2.Interaction()
+  question = interaction.questions.add()
+
+  main_answer_index = None
+  for answer_group_index, answers in answer_groups:
+    if answers:
+      all_answer_valid = True
+      for answer_text in answers:
+        coords = list(find_answer(table, answer_text))
+        if not coords:
+          all_answer_valid = False
+          break
+      if all_answer_valid:
+        if main_answer_index is None:
+          answer = question.answer
+          main_answer_index = answer_group_index
+        else:
+          answer = question.alternative_answers.add()
+        for answer_text in answers:
+          answer.answer_texts.append(answer_text)
+  if main_answer_index is None:
+    beam.metrics.Metrics.counter(_NS, "Failed to find answer in table").inc()
+    return None
+
+  interaction_id = get_interaction_id(example_id, main_answer_index)
+  interaction.id = interaction_id
+  question.id = f"{interaction.id}_0"
+  question.original_text = question_text
+  interaction.table.CopyFrom(table)
+  return interaction
+
 
 def _extract_interaction(
     annotations_spans,
@@ -413,6 +469,38 @@ def _extract_interaction(
       if interaction is not None:
         yield interaction
 
+def _extract_interaction_fever(
+    evidence_ids,
+    table,
+    answer_texts,
+    example_id,
+    claim_text,
+    cell_ids,
+    document_title
+):
+  id_to_evidence_map = zip(evidence_ids, answer_texts)
+  has_interaction = False
+  evidence_table_ids = []
+  for cell_id in cell_ids:
+    cell_with_doc_id = document_title + '_' + cell_id 
+    if cell_with_doc_id in evidence_ids:
+      has_interaction = True
+      evidence_table_ids.append(cell_with_doc_id)
+  
+  answer_texts = []
+  for i, (evidence_id, answer_text) in enumerate(id_to_evidence_map):
+    if evidence_id in evidence_table_ids:
+      answer_texts.append(answer_text)
+  
+  if has_interaction:
+    interaction = _create_interaction_fever(
+        example_id,
+        claim_text,
+        answer_groups=[(0, answer_texts)],
+        table=table,
+    )
+    if interaction is not None:
+      return interaction
 
 def _get_all_spans(
     start,
@@ -519,12 +607,74 @@ def parse(line,):
           example_id,
           question_text,
       ))
-  return {
+  result = {
       "example_id": example_id,
       "contained": bool(interactions),
       "tables": [table for table in span_to_table.values() if table],
       "interactions": interactions,
   }
+  return result
+
+
+def parse_fever(line,):
+  sample = json.loads(line)
+  example_id = sample["id"]
+  claim = sample["claim"]
+  document_title = sample["document_title"]
+  has_tables = sample["has_tables"]
+  table_dicts = sample["table_dicts"]
+  answer_texts = sample["answer_texts"]
+  evidence = sample["evidence"]
+  
+  if not has_tables:
+    beam.metrics.Metrics.counter(_NS, "Examples without tables").inc()
+    return {
+        "example_id": example_id,
+        "contained": False,
+        "tables": [],
+        "interactions": [],
+    }
+
+  tables = []
+  interactions = []
+  for table_dict in table_dicts:
+    table_obj = Table(header=[], rows=[])
+    for header in table_dict['header']:
+      table_obj.header.append(_str(header))
+    
+    for row in table_dict['rows']:
+      table_obj.rows.append(row)
+
+    fp = _get_table_fingerprint(table_obj)
+    table_id = f"{document_title}_{fp}"
+    table = _get_table_proto_fever(
+      table_id,
+      document_title,
+      table_obj,
+    )
+    tables.append(table)
+
+    interaction = _extract_interaction_fever(
+        evidence,
+        table,
+        answer_texts,
+        example_id,
+        claim,
+        table_dict['cell_ids'],
+        document_title
+    )
+    if interaction is not None:
+      interactions.append(interaction)
+
+  result = {
+      "example_id": example_id,
+      "contained": bool(interactions),
+      "tables": tables,
+      "interactions": interactions,
+  }
+  return result
+
+
 
 
 _MAX_INT = 2**64 - 1
