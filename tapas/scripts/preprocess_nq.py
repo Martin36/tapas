@@ -34,7 +34,8 @@ flags.DEFINE_string("input_path", None,
                     "A path to a dir that contains the input files.")
 flags.DEFINE_string("output_path", None,
                     "A path to a dir for writing the output files.")
-
+flags.DEFINE_bool("fever", None,
+                    "Set this if FEVEROUS data should be preprocessed")
 _NS = "main"
 
 
@@ -56,12 +57,14 @@ def to_interaction(
     yield new_interaction
 
 
-def process_line(line_split,):
+def process_line(line_split, fever=False):
   """Parses json and yields result dictionary."""
   beam.metrics.Metrics.counter(_NS, "Lines").inc()
   line, split = line_split
-  result = dict(preprocess_nq_utils.parse(line=line,))
-  # result = dict(preprocess_nq_utils.parse_fever(line=line,))
+  if fever:
+    result = dict(preprocess_nq_utils.parse_fever(line=line,))
+  else:
+    result = dict(preprocess_nq_utils.parse(line=line,))
   if result["contained"]:
     beam.metrics.Metrics.counter(_NS, "Lines with table").inc()
   result["split"] = split
@@ -116,6 +119,7 @@ def _remove_duplicate_tables(tables):
 def build_pipeline(
     filenames,
     output_path,
+    fever
 ):
   """Builds the processing pipeline."""
 
@@ -134,18 +138,25 @@ def build_pipeline(
     results = (
         lines | "Flatten" >> beam.Flatten()
         | "Pre-Shuffle" >> beam.transforms.util.Reshuffle()
-        | "Parse" >> beam.Map(process_line)
+        | "Parse" >> beam.Map(process_line, fever=fever)
         | "Post-Shuffle" >> beam.transforms.util.Reshuffle())
 
     tables = (results | "Tables" >> beam.FlatMap(to_table))
 
-    _ = (
-        _remove_duplicate_tables(tables)
-        # tables
-        | "WriteMergedTables" >> beam.io.WriteToTFRecord(
-            file_path_prefix=get_tables(output_path),
-            shard_name_template="",
-            coder=beam.coders.ProtoCoder(interaction_pb2.Table)))
+    if fever:
+      _ = (
+          tables
+          | "WriteMergedTables" >> beam.io.WriteToTFRecord(
+              file_path_prefix=get_tables(output_path),
+              shard_name_template="",
+              coder=beam.coders.ProtoCoder(interaction_pb2.Table)))
+    else:
+      _ = (
+          _remove_duplicate_tables(tables)
+          | "WriteMergedTables" >> beam.io.WriteToTFRecord(
+              file_path_prefix=get_tables(output_path),
+              shard_name_template="",
+              coder=beam.coders.ProtoCoder(interaction_pb2.Table)))
 
     _ = (
         results | "Intractions" >> beam.FlatMap(to_interaction)
@@ -187,26 +198,32 @@ def main(argv):
 
   input_path = flags.FLAGS.input_path
   output_path = flags.FLAGS.output_path
+  fever = flags.FLAGS.fever
 
   filenames = {}
 
   for corpus in preprocess_nq_utils.Split:
-    # if corpus.name == "train":
-    #   filenames[corpus] = ["data/tapas_test.jsonl"]
-
-    if corpus.name == "train":
-      filenames[corpus] = ["{}/nq-train-sample.jsonl.gz".format(input_path)]
-    elif corpus.name == "dev":
-      filenames[corpus] = ["{}/nq-dev-sample.jsonl.gz".format(input_path)]
-    # filenames[corpus] = list(
-    #     preprocess_nq_utils.get_filenames(
-    #         path=input_path,
-    #         split=corpus,
-    #     ))
+    if fever:
+      if corpus.name == "train":
+        filenames[corpus] = ["{}/tapas_train.jsonl".format(input_path)]
+      elif corpus.name == "dev":
+        filenames[corpus] = ["{}/tapas_dev.jsonl".format(input_path)]
+    
+    else:
+      if corpus.name == "train":
+        filenames[corpus] = ["{}/nq-train-sample.jsonl.gz".format(input_path)]
+      elif corpus.name == "dev":
+        filenames[corpus] = ["{}/nq-dev-sample.jsonl.gz".format(input_path)]
+      filenames[corpus] = list(
+          preprocess_nq_utils.get_filenames(
+              path=input_path,
+              split=corpus,
+          ))
 
   pipeline = build_pipeline(
       filenames,
       output_path,
+      fever
   )
   beam_runner.run(pipeline)
 
